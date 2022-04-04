@@ -1,0 +1,21 @@
+---
+title: "Sales_prediction"
+author: "Luiz Felipe Martucci"
+date: "4/4/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Libraries, include=FALSE}
+
+x <- c("tidyverse")
+(function(x){
+  sapply(x, function(x) if(!x %in% installed.packages()){
+    install.packages(x, dependencies = T)
+  })
+  sapply(x, library, character.only=T)
+})(x)
+```
