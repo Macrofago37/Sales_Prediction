@@ -11,11 +11,174 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ```{r Libraries, include=FALSE}
 
-x <- c("tidyverse")
+Packs <- c("tidyverse", "gridExtra")
 (function(x){
   sapply(x, function(x) if(!x %in% installed.packages()){
     install.packages(x, dependencies = T)
   })
   sapply(x, library, character.only=T)
-})(x)
+})(Packs)
+```
+
+This Hackaton challenge by Analytics Vidhya is about Sales Prediction on BigMart Outlets. The goal is to create a model to predict the sales of each product at a particular outlet.
+
+```{r Loading dataset}
+
+#Train dataset
+BigMart_train <- read.csv("Train_dataset.csv", header = TRUE, na.strings = c("", "NA"))
+
+#Test dataset (doesn't have the target variable). #The target variable (y) is the Item_Outlet_Sales. 
+BigMart_test <- read.csv("Test_dataset.csv", header = TRUE, na.strings = c("", "NA"))
+
+#Combining both datasets
+BigMart <- BigMart_test %>% mutate(Item_Outlet_Sales= NA) %>% 
+  rbind(BigMart_train)
+
+
+```
+
+```{r Correct_variable_types}
+# The column Item_Fat_Content contains overlaying labels for Low_fat, such as LF, Low fat, and Low fat. The same thing happens to Regular, which has Reg and Regular. Therefore this needs to be corrected
+
+#BigMart$Item_Fat_Content %>% unique()
+
+BigMart <- BigMart %>% mutate(
+  Item_Fat_Content= ifelse(Item_Fat_Content %in% c("LF", "low fat", "Low fat"),
+                           "Low Fat", "Regular"))
+
+
+#Correct variable types
+BigMart<-  BigMart %>% mutate(across(where(is.character), as.factor),
+                                Outlet_Establishment_Year= factor(
+                                  Outlet_Establishment_Year))
+
+
+# Updating train and test set
+BigMart_train <- BigMart %>% slice(nrow(BigMart_test)+1:nrow(BigMart_train))
+BigMart_test <- BigMart %>% slice(1:nrow(BigMart_test))
+
+
+
+
+#### Categorical Predictors vs. the predicted variable #####
+
+
+
+```
+
+```{r Distribution_continuous_data}
+
+# The sale data is right-skewed.
+BigMart_train %>% ggplot(aes(Item_Outlet_Sales))+
+  geom_histogram(binwidth = 80,
+                 fill= "#6669A9")+
+  labs(y= "Frequency",
+       x= "Sales")
+
+
+# Distribution of the continuous data.
+BigMart %>% select(which(sapply(., class)=="numeric"), -Item_Outlet_Sales) %>% 
+  pivot_longer(cols=everything(),
+               names_to = "Col") %>% 
+  ggplot(aes(value)) +
+  geom_histogram(bins = 100,
+                 fill="#6669A9")+
+  facet_grid(~Col, scales = "free")
+
+
+
+
+```
+
+```{r Distribution_categorical_data}
+
+(function(){
+  BigMart_Factor <- BigMart %>% select(
+    which(sapply(., class)=="factor"), -Item_Identifier) %>% 
+    select(Item_Type, everything()) #Change order
+  
+  Columns <- colnames(BigMart_Factor)
+  
+
+  Graphs <-  apply(BigMart_Factor,2, function(x){
+    BigMart_Factor %>% 
+      ggplot()+
+      geom_bar(aes(x), fill="#6669A9")+
+      ylab("Frequency")+
+      theme(axis.text.x= element_text(angle=45, vjust = .5, hjust = 0.5),
+            axis.title.x = element_blank())
+  })
+ 
+  gridExtra::grid.arrange(grobs=Graphs,
+                          layout_matrix= rbind(c(1,1,1),
+                                               c(2,3,4),
+                                               c(5,6,7)))
+})()
+ # As we can see, supermarket_type_1 has more sales than other outlet types. Furthermore, and regular food sells more than low-fat food. 
+
+
+```
+
+```{r num_predictors_vs_y}
+
+(function(){
+  #Cria os gráficos que são númericos
+  Graphs <- rapply(BigMart_train, function(x){
+    BigMart_train  %>% ggplot()+
+      geom_point(aes(x, Item_Outlet_Sales), colour="#874D5E", alpha=.4) +
+      labs(y="Item Outlet Sales")
+    
+  }, classes = "numeric", how="list") %>% 
+    discard(is.null)
+  
+  #Renomeia o eixo x
+  Nomes <- str_replace(names(Graphs), "_", " ")
+  Corrected_graphs <- map2(Graphs, Nomes, function(Graphs, Nomes){
+    Graphs + labs(x=Nomes)
+  })
+  Corrected_graphs["Item_Outlet_Sales"] <- NULL
+  
+  #Plota os gráficos
+  gridExtra::grid.arrange(grobs=Corrected_graphs)
+  
+})()
+# It is strange to have items with zero visibility.
+# There is a clear pattern of 4 categories of items in Items MRP.
+
+
+
+```
+
+```{r cat_predictors_vs_y}
+
+
+(function(){
+  #Arruma a sequência e cria os gráficos que são categóricos 
+  Data <- BigMart_train %>% select(Item_Type, where(is.factor), -Item_Identifier, Item_Outlet_Sales)
+  Graphs <- lapply(Data, function(x){
+    Data %>% ggplot()+
+      geom_violin(aes(x, Item_Outlet_Sales), fill="#874D5E") +
+      labs(y="Item Outlet Sales")+
+      theme(axis.text.x= element_text(angle=45, vjust = .5, hjust = 0.5))
+    
+  })
+  
+  #Renomeia o eixo x
+  Graphs["Item_Outlet_Sales"] <- NULL
+  Nomes <- str_replace(names(Graphs), "_", " ")
+  Corrected_graphs <- map2(Graphs, Nomes, function(Graphs, Nomes){
+    Graphs + labs(x=Nomes)
+  })
+  
+  gridExtra::grid.arrange(grobs=Corrected_graphs,
+                          layout_matrix= rbind(c(1,1),
+                                               c(2,3),
+                                               c(4,5),
+                                               c(6,7)))
+
+})()
+
+# Outle
+
+
 ```
