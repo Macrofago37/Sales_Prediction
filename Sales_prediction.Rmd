@@ -11,13 +11,14 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ```{r Libraries, include=FALSE}
 
-Packs <- c("tidyverse", "gridExtra")
+Packs <- c("tidyverse", "gridExtra", "randomForest", "caret", "parallel", "doParallel")
 (function(x){
   sapply(x, function(x) if(!x %in% installed.packages()){
     install.packages(x, dependencies = T)
   })
   sapply(x, library, character.only=T)
 })(Packs)
+
 ```
 
 This Hackaton challenge by Analytics Vidhya is about Sales Prediction on BigMart Outlets. The goal is to create a model to predict the sales of each product at a particular outlet.
@@ -177,8 +178,174 @@ BigMart %>% select(which(sapply(., class)=="numeric"), -Item_Outlet_Sales) %>%
                                                c(6,7)))
 
 })()
+# The sales patterns on the outlet OUTO10 and OUT019 are similar and different from everyone else. 
+# A similar thing happens between small outlets and NA outlets. Therefore, the NA data probably is about small outlets and will be defined as so.
 
-# Outle
 
+
+
+```
+
+```{r Impute_NA_&_create_variables_pt1}
+
+
+BigMart <- (function(){
+  # Classify Items_Type into perishable and non-perishable.
+  Perishable <- c("Dairy",
+                  "Fruits and Vegetables", 
+                  "Seafood",
+                  "Meat",
+                  "Breakfast",
+                  "Starchy Foods",
+                  "Breads")
+  
+  Non_perishable <- c("Baking Goods",
+                      "Frozen Foods",
+                      "Health and Hygiene",
+                      "Hard Drinks",
+                      "Soft Drinks",
+                      "Household",
+                      "Canned")
+  
+  # Define cutoff points for Item_MRP clusters.
+  Cutoff_Item_MRP <- kmeans(BigMart$Item_MRP, 4)$centers %>% sort()
+  
+  BigMart %>% mutate(Perishable_State=case_when(
+    Item_Type %in% Perishable ~ "Perishable",
+    Item_Type %in% Non_perishable ~ "Non-Perishable",
+    TRUE ~ "Other"),
+    #NA Outlet_Size to Small
+    Outlet_Size= ifelse(is.na(Outlet_Size),
+                        "Small", paste(Outlet_Size)),
+    # Splitting the first two letters of Item_Identifier to use as a new product identifier
+    Cat_Item_Identifier= substr(Item_Identifier, 1, 2),
+    # Change non-edible items from Low-fat to non-edible.
+    Item_Fat_Content= ifelse(Cat_Item_Identifier=="NC",
+                             "Non-edible", paste(Item_Fat_Content)),
+    # Item_MRP cluster
+    Item_MRP_cluster= factor(case_when(
+      Item_MRP < Cutoff_Item_MRP[1] ~ 1,
+      Item_MRP > Cutoff_Item_MRP[1] & Item_MRP < Cutoff_Item_MRP[2] ~ 2,
+      Item_MRP > Cutoff_Item_MRP[2] & Item_MRP < Cutoff_Item_MRP[3] ~ 3,
+      TRUE ~ 4
+    ))
+    
+    )
+})()
+
+```
+
+```{r Impute_NA_&_create_variables_pt2}
+# Imputing missing values for Item_Weight using Random Forest
+# The use of the Random Forest algorithm to input missing values for Item_Weight is because it provides a lower RMSE than a model of linear regression.
+
+
+Weights_datasets <- (function(){
+  
+  #Extract remove NAs from Item_Weight, and column Item_Identifier
+  BigMart_weight <- BigMart %>% select(-c(Item_Outlet_Sales, Item_Identifier)) %>% 
+    drop_na(Item_Weight)
+   # select(-Item_Identifier) %>%
+
+  
+  #Create test and train datasets.
+  
+  set.seed(44)
+  Item_weight_index <- caret::createDataPartition(
+    BigMart_weight$Item_Weight, times = 1, p=.8, list=F)
+  
+  Train_weight <- BigMart_weight[Item_weight_index,]
+  Test_weight <- BigMart_weight[-Item_weight_index,]
+  
+  list(Train= Train_weight,
+       Test= Test_weight)
+  
+})()
+
+
+# RMSE from linear model
+(function(){
+
+  # Model
+  lm_fit <- Weights_datasets$Train %>% 
+    lm(Item_Weight ~ ., data=.)
+
+  # Pred on test
+  pred_lm <- predict(lm_fit, Weights_datasets$Test)
+  
+  # RMSE lm on test 
+  sqrt(mean((Weights_datasets$Test$Item_Weight - pred_lm)^2))
+})() # RMSE= 4.64309
+
+
+# Random Forest model
+# Finding best mtry value
+set.seed(44)
+best_mtry <- randomForest::tuneRF(Weights_datasets$Train,
+                     Weights_datasets$Train$Item_Weight,
+                     stepFactor = 1,
+                     improve= 1e-5,
+                     ntree=500)
+
+
+
+
+# Cluster for parallel processing
+cluster <- parallel::makeCluster(detectCores())
+registerDoParallel(cluster)
+
+# Training the Forest
+set.seed(44)
+system.time(rf_fit <- Weights_datasets$Train %>%
+  train(Item_Weight~.,
+        data=.,
+        method="rf",
+        ntree=300,
+        tuneLength= best_mtry[1], #this is the mtry of randomForest package
+        metric="RMSE",
+        maximize=FALSE,
+        trControl= trainControl(
+          method="repeatedcv", #k-fold com repetições, method=cv é k-fold sem rep
+          number= 10,
+          repeats=3,
+          savePredictions = TRUE,
+          returnResamp = "all",
+          allowParallel = TRUE)))
+
+
+# close cluster
+stopCluster(cluster)
+
+                        
+# RMSE from Random Forest
+(function(){
+  Pred_rf <- predict(rf_fit,  Weights_datasets$Test)
+  
+  # RMSE
+  sqrt(mean(( Weights_datasets$Test$Item_Weight - Pred_rf)^2))
+})() # RMSE= 2.253846. Improvement of 52% when compared to the lm model.
+
+
+# Graph: RF fitting
+tibble(y=BigMart$Item_Weight,
+       y_hat= predict(rf_fit, BigMart)) %>%
+  ggplot(aes(y_hat, y))+
+  geom_point(color="#6669A9", alpha=.3)+
+  labs(y="Observed values",
+       x="Predicted values",
+       title = "Random Forest fitting")
+
+
+
+
+# Replace missing values for predicted values from the Random Forest model.
+BigMart <- BigMart %>% mutate(
+  Item_Weight= coalesce(Item_Weight,
+                        predict(rf_fit, BigMart)),
+                        # Calculate item price per weight
+                        Item_MRP_per_Weight= Item_MRP/Item_Weight)
+
+
+  
 
 ```
