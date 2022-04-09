@@ -9,9 +9,9 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-```{r Libraries, include=FALSE}
+```{r Libraries_and_FNs, include=FALSE}
 
-Packs <- c("tidyverse", "gridExtra", "randomForest", "caret", "parallel", "doParallel")
+Packs <- c("tidyverse", "gridExtra", "randomForest", "caret", "parallel", "doParallel", "purrr", "ranger")
 (function(x){
   sapply(x, function(x) if(!x %in% installed.packages()){
     install.packages(x, dependencies = T)
@@ -19,11 +19,35 @@ Packs <- c("tidyverse", "gridExtra", "randomForest", "caret", "parallel", "doPar
   sapply(x, library, character.only=T)
 })(Packs)
 
+
+# function to calculate RMSE
+Pred_RMSE <- function(Model, Data){
+  
+  #Extract variable y from model
+  Args_Formula <- Model[sapply(Model, purrr::is_formula)]$terms[1]
+  name_y <- sub("~.*","", Args_Formula )[2]
+  y <- Data[, name_y]
+  
+  
+  #Predict 
+  Pred <- predict(Model, Data)
+  
+  sqrt(mean((y - Pred)^2))
+
+}
+
+#Unregister parallel 
+Un_parallel <- function() {
+ env <- foreach:::.foreachGlobals
+ 
+ rm(list=ls(name=env), pos=env)
+}
+
 ```
 
 This Hackaton challenge by Analytics Vidhya is about Sales Prediction on BigMart Outlets. The goal is to create a model to predict the sales of each product at a particular outlet.
 
-```{r Loading dataset}
+```{r Loading_dataset}
 
 #Train dataset
 BigMart_train <- read.csv("Train_dataset.csv", header = TRUE, na.strings = c("", "NA"))
@@ -67,7 +91,7 @@ BigMart_test <- BigMart %>% slice(1:nrow(BigMart_test))
 
 ```
 
-```{r Distribution_continuous_data}
+```{r EDA_Distribution_continuous_data}
 
 # The sale data is right-skewed.
 BigMart_train %>% ggplot(aes(Item_Outlet_Sales))+
@@ -91,7 +115,7 @@ BigMart %>% select(which(sapply(., class)=="numeric"), -Item_Outlet_Sales) %>%
 
 ```
 
-```{r Distribution_categorical_data}
+```{r EDA_Distribution_categorical_data}
 
 (function(){
   BigMart_Factor <- BigMart %>% select(
@@ -120,7 +144,7 @@ BigMart %>% select(which(sapply(., class)=="numeric"), -Item_Outlet_Sales) %>%
 
 ```
 
-```{r num_predictors_vs_y}
+```{r EDA_num_predictors_vs_y}
 
 (function(){
   #Cria os gráficos que são númericos
@@ -150,7 +174,7 @@ BigMart %>% select(which(sapply(., class)=="numeric"), -Item_Outlet_Sales) %>%
 
 ```
 
-```{r cat_predictors_vs_y}
+```{r EDA_cat_predictors_vs_y}
 
 
 (function(){
@@ -186,7 +210,7 @@ BigMart %>% select(which(sapply(., class)=="numeric"), -Item_Outlet_Sales) %>%
 
 ```
 
-```{r Impute_NA_&_create_variables_pt1}
+```{r Impute_NA_create_variables_pt1}
 
 
 BigMart <- (function(){
@@ -235,22 +259,29 @@ BigMart <- (function(){
 
 ```
 
-```{r Impute_NA_&_create_variables_pt2}
+```{r Impute_NA_create_variables_pt2}
 # Imputing missing values for Item_Weight using Random Forest
 # The use of the Random Forest algorithm to input missing values for Item_Weight is because it provides a lower RMSE than a model of linear regression.
 
-
+set.seed(44)
 Weights_datasets <- (function(){
   
   #Extract remove NAs from Item_Weight, and column Item_Identifier
-  BigMart_weight <- BigMart %>% select(-c(Item_Outlet_Sales, Item_Identifier)) %>% 
+  BigMart_weight <- BigMart %>% 
+    select(-c(Item_Outlet_Sales,
+              Item_Identifier,
+              #OUT019 & OUT027 only have itens without weight
+              Outlet_Identifier,
+              #Supermarket type3 also only have itens without weight
+              Outlet_Type
+    )) %>% 
     drop_na(Item_Weight)
    # select(-Item_Identifier) %>%
 
   
   #Create test and train datasets.
   
-  set.seed(44)
+
   Item_weight_index <- caret::createDataPartition(
     BigMart_weight$Item_Weight, times = 1, p=.8, list=F)
   
@@ -270,38 +301,34 @@ Weights_datasets <- (function(){
   lm_fit <- Weights_datasets$Train %>% 
     lm(Item_Weight ~ ., data=.)
 
-  # Pred on test
-  pred_lm <- predict(lm_fit, Weights_datasets$Test)
-  
-  # RMSE lm on test 
-  sqrt(mean((Weights_datasets$Test$Item_Weight - pred_lm)^2))
+  Pred_RMSE(lm_fit,  Weights_datasets$Test)
+ 
 })() # RMSE= 4.64309
 
 
 # Random Forest model
 # Finding best mtry value
 set.seed(44)
-best_mtry <- randomForest::tuneRF(Weights_datasets$Train,
+rf_weights_mtry <- randomForest::tuneRF(Weights_datasets$Train,
                      Weights_datasets$Train$Item_Weight,
                      stepFactor = 1,
                      improve= 1e-5,
-                     ntree=500)
+                     ntree=161)
 
 
 
 
-# Cluster for parallel processing
-cluster <- parallel::makeCluster(detectCores())
-registerDoParallel(cluster)
 
 # Training the Forest
+
+registerDoParallel(makeCluster(detectCores()))
 set.seed(44)
-system.time(rf_fit <- Weights_datasets$Train %>%
+rf_weight1 <- Weights_datasets$Train %>%
   train(Item_Weight~.,
         data=.,
         method="rf",
-        ntree=300,
-        tuneLength= best_mtry[1], #this is the mtry of randomForest package
+        ntree=150,
+        tuneLength= rf_weights_mtry[1], #this is the mtry of randomForest package
         metric="RMSE",
         maximize=FALSE,
         trControl= trainControl(
@@ -310,25 +337,17 @@ system.time(rf_fit <- Weights_datasets$Train %>%
           repeats=3,
           savePredictions = TRUE,
           returnResamp = "all",
-          allowParallel = TRUE)))
-
-
-# close cluster
-stopCluster(cluster)
+          allowParallel = TRUE))
 
                         
 # RMSE from Random Forest
-(function(){
-  Pred_rf <- predict(rf_fit,  Weights_datasets$Test)
-  
-  # RMSE
-  sqrt(mean(( Weights_datasets$Test$Item_Weight - Pred_rf)^2))
-})() # RMSE= 2.253846. Improvement of 52% when compared to the lm model.
+Pred_RMSE(rf_weight1, Weights_datasets$Test)
+# RMSE= 2.2212.
 
 
 # Graph: RF fitting
 tibble(y=BigMart$Item_Weight,
-       y_hat= predict(rf_fit, BigMart)) %>%
+       y_hat= predict(rf_weight1, BigMart)) %>%
   ggplot(aes(y_hat, y))+
   geom_point(color="#6669A9", alpha=.3)+
   labs(y="Observed values",
@@ -337,15 +356,296 @@ tibble(y=BigMart$Item_Weight,
 
 
 
-
 # Replace missing values for predicted values from the Random Forest model.
 BigMart <- BigMart %>% mutate(
   Item_Weight= coalesce(Item_Weight,
-                        predict(rf_fit, BigMart)),
+                        predict(rf_weight1, BigMart)),
                         # Calculate item price per weight
                         Item_MRP_per_Weight= Item_MRP/Item_Weight)
 
 
   
+
+```
+
+```{r, Predict_Item_Outlet_Sales_LM_model}
+#####Predicting Item_Outlet_Sales
+
+# Update train and test set
+BigMart_train <- BigMart %>% slice(nrow(BigMart_test)+1:nrow(BigMart_train))
+BigMart_test <- BigMart %>% slice(1:nrow(BigMart_test))
+
+#Separate train dataset into test and train
+set.seed(44)
+Index_train_sales <- createDataPartition(BigMart_train$Item_Outlet_Sales,
+                                         times=1,
+                                         p=.8, 
+                                         list=FALSE)
+
+
+Train_sales <- BigMart_train[Index_train_sales,] %>% select(-Item_Identifier)
+Test_sales <- BigMart_train[-Index_train_sales,] %>% select(-Item_Identifier)
+
+
+
+#####LM Model
+
+(function(){
+  
+  ####Correcting skewness of Item_Visibility and Item_MRP_per_Weight
+BigMart_lm <- BigMart_train %>% mutate(
+  Item_Visibility= log(Item_Visibility+1), 
+  Item_MRP_per_Weight= log(Item_MRP_per_Weight+1)
+)
+
+LM_train <- BigMart_lm[Index_train_sales,] %>% select(-Item_Identifier)
+LM_test <- BigMart_lm[-Index_train_sales,] %>% select(-Item_Identifier)
+
+LM_Sales_fit <- LM_train %>% lm(Item_Outlet_Sales ~., data=.)
+
+
+Pred_RMSE(LM_Sales_fit, LM_test)
+ 
+
+})() #RMSE= 1134.312
+
+
+
+
+
+
+```
+
+```{r Predict_Item_Outlet_Sales_RF_model}
+# Best mtry
+set.seed(44)
+Sales_mtry <- randomForest::tuneRF(Train_sales,
+                                  Train_sales$Item_Outlet_Sales,
+                                  stepFactor = 1,
+                                  improve= 1e-5,
+                                  ntree=500)
+
+
+
+cluster <- makeCluster(detectCores())
+registerDoParallel(makeCluster(detectCores()))
+
+# Training the Forest
+set.seed(44)
+system.time(rf_sales_fit <-
+              Train_sales %>%
+              train(Item_Outlet_Sales ~.,
+                    data=.,
+                    method="rf",
+                    ntree=150,
+                    tuneLength= Sales_mtry[1], #this is the mtry of randomForest package
+                    metric="RMSE",
+                    maximize=FALSE,
+                    trControl= trainControl(
+                      method="repeatedcv", #k-fold com repetições, method=cv é k-fold sem rep
+                      number= 10,
+                      repeats=3,
+                      savePredictions = TRUE,
+                      returnResamp = "all",
+                      allowParallel = TRUE)))
+
+
+# close cluster
+stopCluster(cluster)
+
+# RMSE from rf
+Pred_RMSE(rf_sales_fit, Test_sales) # RMSE= 1118.098
+```
+
+```{r rf_fit2}
+
+cluster <- makeCluster(detectCores())
+registerDoParallel(makeCluster(detectCores()))
+
+# Training the Forest
+set.seed(44)
+system.time(rf_sales_fit2 <-
+              Train_sales %>%
+              train(Item_Outlet_Sales ~.,
+                    data=.,
+                    method="ranger",
+                    num.trees=500,
+                    tuneGrid= expand.grid(
+                      mtry=Sales_mtry[1],
+                      splitrule="variance",
+                      min.node.size=20), #Increased because of overfitting 
+                    metric="RMSE",
+                    maximize=FALSE,
+                    trControl= trainControl(
+                      method="repeatedcv", #k-fold com repetições, method=cv é k-fold sem rep
+                      number= 10,
+                      repeats=3,
+                      savePredictions = TRUE,
+                      returnResamp = "all",
+                      allowParallel = TRUE)))
+
+
+Pred_RMSE(rf_sales_fit2, Test_sales)
+
+Submission_rf <- tibble(Item_Identifier= BigMart_test$Item_Identifier, 
+                        Outlet_Identifier= BigMart_test$Outlet_Identifier,
+                        Item_Outlet_Sales= predict(rf_sales_fit2, BigMart_test))
+
+write.csv(Submission_rf, "rf_submit.csv", row.names=F)
+
+```
+
+```{r xgboost}
+
+BigMartXGB <- (function(){
+  #Select factor variables and make dummy
+  Fac_BigMart <- BigMart %>% select(where(is.factor),
+                                    -Item_Identifier)
+  Dummy <- Fac_BigMart %>% dummyVars("~ . ", data=.)
+  
+  Dummy_df <- data.frame(predict(Dummy, newdata=Fac_BigMart))
+  
+  #Select Numeric variables and scale them
+  Num_BigMart <- BigMart %>% select(where(is.numeric), -Item_Outlet_Sales)
+  
+  Num_BigMart_pP <- preProcess(Num_BigMart, methods= c("center", "scale"))
+  
+  Num_BigMart_scl <- predict(Num_BigMart_pP, Num_BigMart  )
+  
+  #Merge numeric variables with dummy ones
+  Complete_data <- cbind(BigMart$Item_Outlet_Sales,
+        Num_BigMart_scl,
+        Dummy_df) %>% rename(Item_Outlet_Sales = 1)
+  
+  #Separate into the original train and test datasets
+  Train <- Complete_data %>% slice(nrow(BigMart_test)+1:nrow(BigMart_train))
+  Test <- Complete_data %>% slice(1:nrow(BigMart_test))
+  
+  list(Complete_data=Complete_data,
+       Train=Train, 
+       Test=Test)
+
+})()
+
+
+xgb_Train <- BigMartXGB$Train[Index_train_sales,]
+xgb_Test <- BigMartXGB$Train[-Index_train_sales,]
+
+
+
+
+xgb_fit_default <- xgb_Train %>% caret::train(Item_Outlet_Sales ~ .,
+                                              data=.,
+                                              method="xgbTree",
+                                              verbose=TRUE, 
+                                              metric="RMSE",
+                                              maximize=FALSE)
+
+Pred_RMSE(xgb_fit_default, xgb_Test) #1083.994
+
+
+# This gives negative values
+registerDoParallel(makeCluster(detectCores()))
+set.seed(44)
+#grid search xgb_fit
+xgb_fit <- xgb_Train %>% caret::train(Item_Outlet_Sales ~ .,
+                                      data=.,
+                                      method="xgbTree",
+                                      tree_method="hist", #To run faster
+                                      verbose=TRUE, 
+                                      metric="RMSE",
+                                      maximize=FALSE,
+                                      
+                                      trControl= trainControl(
+                                        method="repeatedcv",
+                                        number=10,
+                                        repeats=5,
+                                        verboseIter = TRUE, #To have training log,
+                                        allowParallel=T,
+                                      ),
+                                      tuneGrid= expand.grid(
+                                        nrounds=200, #number of trees, default= 100
+                                        max_depth= 2, #default =6
+                                        eta= .04, #learning rate, default= .3
+                                        gamma=0.75, #default=0
+                                        colsample_bytree= .8, #default=1 
+                                        min_child_weight= 58, #default=1
+                                        subsample=1 #defaut=1
+                                      ))
+
+
+#On the full Train data
+xgb_fit_full <- BigMartXGB$Train %>%
+  caret::train(Item_Outlet_Sales ~ .,
+               data=.,
+               method="xgbTree",
+               tree_method="hist", #To run faster
+               verbose=TRUE, 
+               metric="RMSE",
+               maximize=FALSE,
+               
+               trControl= trainControl(
+                 method="repeatedcv",
+                 number=10,
+                 repeats=5,
+                 verboseIter = TRUE, #To have training log,
+                 allowParallel=T,
+               ),
+               tuneGrid= expand.grid(
+                 nrounds=200, #number of trees, default= 100
+                 max_depth= 2, #default =6
+                 eta= .04, #learning rate, default= .3
+                 gamma=0.75, #default=0
+                 colsample_bytree= .8, #default=1 
+                 min_child_weight= 58, #default=1
+                                        subsample=1 #defaut=1
+                                      ))
+
+
+Pred_RMSE(xgb_fit_full, xgb_Test) #RMSE=1080.803
+
+
+
+
+
+registerDoParallel(makeCluster(detectCores()))
+set.seed(44)
+#grid search xgb_fit
+xgb_fit_3 <- xgb_Train %>%
+  caret::train(Item_Outlet_Sales ~ .,
+               data=.,
+               method="xgbTree",
+               tree_method="hist", #To run faster
+               objective="reg:tweedie", #To avoid neg values
+               tweedie_variance_power=1.2, #Poisson distribution
+               verbose=TRUE, 
+               metric="RMSE",
+               maximize=FALSE,
+               set.seed(44),
+               
+               trControl= trainControl(
+                 method="repeatedcv",
+                 number=10,
+                 repeats=5,
+                 verboseIter = TRUE, #To have training log,
+                 allowParallel=T,
+               ),
+               tuneGrid= expand.grid(
+                 nrounds=seq(200, 1000, 200), #number of trees, default= 100
+                 max_depth= 2, #default =6
+                 eta= .04, #learning rate, default= .3
+                 gamma=0.75, #default=0
+                 colsample_bytree= .8, #default=1 
+                 min_child_weight= 58, #default=1
+                 subsample=1 #defaut=1
+               ))
+
+Pred_RMSE(xgb_fit_3, xgb_Test)
+
+Submission <- tibble(Item_Identifier= BigMart_test$Item_Identifier, 
+                        Outlet_Identifier= BigMart_test$Outlet_Identifier,
+                        Item_Outlet_Sales= predict(xgb_fit_3, BigMartXGB$Test))
+
+write.csv(Submission, "xgb_submit.csv", row.names=F)
 
 ```
